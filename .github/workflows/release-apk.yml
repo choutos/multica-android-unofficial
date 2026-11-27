@@ -1,0 +1,89 @@
+name: Build release APK
+
+# Builds the release APK and attaches it to a GitHub release when a v* tag is
+# pushed. Can also be run manually (workflow_dispatch) — in that case the APK
+# is available as a workflow artifact only.
+#
+# Release builds are signed with the repo's default (debug) key, matching
+# scripts/android-build.sh — see scripts/build-release.sh for properly signed
+# builds.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Install Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platform-tools" "platforms;android-36" "build-tools;36.0.0" \
+            "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Ensure debug keystore (release signs with debug key)
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build release APK
+        env:
+          APP_ENV: production
+        run: bash apps/mobile/scripts/android-build.sh release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: multica-release-apk
+          path: apps/mobile/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Multica (Unofficial) ${{ github.ref_name }}
+          body: |
+            Release APK built from this fork's main.
+            Signed with a debug key (sideloadable; uninstall any previous copy signed with a different key first).
+          files: apps/mobile/android/app/build/outputs/apk/release/*.apk
+          make_latest: true
+          generate_release_notes: true
